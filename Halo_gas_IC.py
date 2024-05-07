@@ -28,7 +28,7 @@ import tools_python as tp
 ############################################################################################################
 
 reuse_tables = False # reuse integration tables. Make sure you are using the same parameters
-Parallel = False # Use multiple threads 
+Parallel = False # Use multiple threads (not yet implemented)
 
 have_gas = True
 have_DM = True
