@@ -28,26 +28,28 @@ import tools_python as tp
 ############################################################################################################
 
 reuse_tables = False # reuse integration tables. Make sure you are using the same parameters
+Parallel = False # Use multiple threads 
 
-gas_profile = 'Hernquist'
+have_gas = True
+have_DM = True
+
 #gas_profile = 'Burkert'
+gas_profile = 'Hernquist'
 
-N_sampling = 100000 # size of the arrays created in numerical integration
+filename = 'dSph_normal_DM1e6_gas1e5'
 
-N_part_gas = 100000 # number of particles to sample
-r_s_gas = 194.78 # scale radius
-# if rho_s is specified, the total mass will be calculated.
-# if not, it will be calculated from the total mass.
-rho_s_gas = 9.72e-5 # scale density
-#total_mass_gas = 1 # total mass within r_max in 10^10 M_solar
+N_sampling = 10000 # size of the arrays created in numerical integration
 
-N_part_DM = 100000
+N_part_gas = int(1e5) # number of particles to sample
+r_s_gas = 0.4 # normal dsph
+#r_s_gas = 194.78 # cluster
+rho_s_gas = 0.26 # normal dsph
+# rho_s_gas = 9.72e-5 # cluster
+
+N_part_DM = int(1e6)
 r_max = 20 # maximum sampling distance of the system in units of r_s_DM
-r_s_DM = 389.31
-# if rho_s is specified, the total mass will be calculated.
-# if not, it will be calculated from the total mass.
-rho_s_DM = 1.14e-4
-#total_mass_DM = 100 # total mass within r_max in 10^10 M_solar
+r_s_DM = 9.5 # dSph
+rho_s_DM = 4.022e-4 # dSph
 
 ############################################################################################################
 ################################################ FUNCTIONS #################################################
@@ -66,13 +68,17 @@ def NFW(r):
     return rho_s_DM/(x * (1+x**2))
 
 def Hernquist(r):
-    x = r/r_s_DM
-    return rho_s_DM/(x * (1+x)**3)
+    x = r/r_s_gas
+    return rho_s_gas/(x * (1+x)**3)
 
 def mass_Hernquist(r):
     # return mass enclosed in r
-    x = r/r_s_DM
-    return 2 * np.pi * rho_s_DM * r_s_DM**3 * x**2/(x+1)**2
+    x = r/r_s_gas
+    return 2 * np.pi * rho_s_gas * r_s_gas**3 * x**2/(x+1)**2
+
+def inverse_CPD_Hernquist(x):
+    x *= (r_max_gas/r_s_gas)**2/( (r_max_gas/r_s_gas) +1)**2
+    return - r_s_gas * np.sqrt(x)/(np.sqrt(x)-1)
 
 def mass_NFW(r):
     # return mass enclosed in r
@@ -83,9 +89,9 @@ def inverse_CPD_NFW(x):
     # draw random radius from inverse CPD for NFW profile.
     # assumes that x is drawn from a uniform distribution 
     # between 0 and 1. 
-    # r_max is the maximum sampling distance in units of r_s
+    # r_max is the maximum sampling distance 
     # (has to be finite in this case)
-    x *= np.log((r_max/r_s_DM)**2 +1)
+    x *= np.log((r_max_DM/r_s_DM)**2 +1)
     return r_s_DM * np.sqrt(np.exp(x) -1)
 
 def mass_Burkert(r):
@@ -94,28 +100,40 @@ def mass_Burkert(r):
     return quad(dMdr, 0, r)[0]
 
 if gas_profile == 'Burkert':
-    def density_gas(r):
-        return Burkert(r)
     def mass_gas(r):
         return mass_Burkert(r)
+    def density_gas(r):
+        return Burkert(r)
+    
 elif gas_profile == 'Hernquist':
+    def mass_gas(r):    
+        return mass_Hernquist(r)
     def density_gas(r):
         return Hernquist(r)
-    def mass_gas(r):
-        return mass_Hernquist(r)
-else:
-    raise Expection("Unknown density profile <",gas_profile,">")
 
+def mean_particle_separation_gas(r):
+    N = mass_gas(r)/part_mass_gas # number of particles enclosed in r
+    n = 3*N/(4 * np.pi * r**3) # average number density
+    return n**(-1/3) # mean seperation
+
+def mean_particle_separation_DM(r):
+    N = mass_NFW(r)/part_mass_DM # number of particles enclosed in r
+    n = 3*N/(4 * np.pi * r**3) # average number density
+    return n**(-1/3) # mean seperation
+    
 def temp_gas(r):
     def dpdr(r):
-        return  43000 * density_gas(r) * (mass_NFW(r) + mass_gas(r))/r**2
+        return  43000 * density_gas(r) * total_mass(r)/r**2
     p = quad(dpdr, r, np.inf)[0]
     u = (3/2) * p / density_gas(r)
     return u
 
+def total_mass(r):
+    return have_DM * mass_NFW(r) + have_gas * mass_gas(r)
+
 def sigma_2_halo(r):
     def dpdr(r):
-        return 43000 * NFW(r) * (mass_NFW(r) + mass_gas(r))/r**2
+        return 43000 * NFW(r) * total_mass(r)/r**2
     p = quad(dpdr, r, np.inf)[0]
     sigma_2 = p / NFW(r)
     return sigma_2
@@ -135,116 +153,114 @@ def printProgressBar (iteration, total, prefix = '', suffix = '', decimals = 1, 
 ######################################## CALCULATE INTEGRATION TABLES #######################################
 #############################################################################################################
 
-r_max *= r_s_DM # convert r_max into gadget units
+r_max_gas = r_max * r_s_gas
+r_max_DM = r_max * r_s_DM
 
 if reuse_tables:
     tables = np.load('int_tables.npy')
-    r_arr = tables[0]
-    mass_arr_gas = tables[1]
-    CPD_arr_gas = tables[2]
-    temp_arr = tables[3]
-    sigma2_arr = tables[4]
+    r_arr_gas = tables[0]
+    r_arr_DM = tables[1]
+    mass_arr_gas = tables[2]
+    CPD_arr_gas = tables[3]
+    temp_arr = tables[4]
+    sigma2_arr = tables[5]
 
 else:
-    r_arr = np.logspace(-9, np.log10(r_max), N_sampling)
-
-    print('Calculating gas mass and commulative probability distribution ... ', end='')
-
-    mass_arr_gas = np.zeros(N_sampling)
-
-    for i, r in enumerate(r_arr):
-        mass_arr_gas[i] = mass_gas(r)
-        # the CPD is proportional to the mass enclosed in r.
-        # Normalize it such that CPD(r_max) = 1:
-    CPD_arr_gas = mass_arr_gas/mass_arr_gas[N_sampling -1]
-
-    print('done!')
-    print('Calculating gas temperature profile... ')
-
-    temp_arr = np.zeros(N_sampling)
-
-    for i, r in enumerate(r_arr):
-        printProgressBar(i, len(r_arr), length=50)
-        temp_arr[i] = temp_gas(r)
-
-    print('done!')
-    print('Calculating DM velocity dispersion profile...')
-
-    sigma2_arr = np.zeros(N_sampling)
+    r_arr_gas = np.logspace(-9+np.log10(r_max_gas), np.log10(r_max_gas), N_sampling)
+    r_arr_DM = np.logspace(-9+np.log10(r_max_DM), np.log10(r_max_DM), N_sampling)
     
-    for i, r in enumerate(r_arr):
-        printProgressBar(i, len(r_arr), length=50)
-        sigma2_arr[i] = sigma_2_halo(r)
+    if have_gas:
+        print('Calculating gas temperature profile... ')
 
-    # save tables for later use
-    tables = np.array([r_arr, mass_arr_gas, CPD_arr_gas, temp_arr, sigma2_arr])
-    np.save('int_tables', tables)
+        temp_arr = np.zeros(N_sampling)
 
-total_mass_gas = mass_arr_gas[N_sampling - 1]
-total_mass_DM = mass_NFW(r_max)
-print('done!')
+        for i, r in enumerate(r_arr_gas):
+            printProgressBar(i, len(r_arr_gas), length=50)
+            temp_arr[i] = temp_gas(r)
+
+    if have_DM:
+        print('')
+        print('Calculating DM velocity dispersion profile...')
+
+        sigma2_arr = np.zeros(N_sampling)
+
+        for i, r in enumerate(r_arr_DM):
+            printProgressBar(i, len(r_arr_DM), length=50)
+            sigma2_arr[i] = sigma_2_halo(r)
+
+        # save tables for later use
+        tables = np.array([r_arr_gas, r_arr_DM, temp_arr, sigma2_arr])
+        np.save('int_tables', tables)
+    
+total_mass_gas = mass_gas(r_max_gas)
+total_mass_DM = mass_NFW(r_max_DM)
+
 #############################################################################################################
 ############################################# SAMPLE PARTICLES ##############################################
 #############################################################################################################
 
-print('Sampling gas ...')
-
-coords_gas = np.zeros([N_part_gas, 3])
-vels_gas = np.zeros([N_part_gas, 3])
-temps_gas = np.zeros(N_part_gas)
-
-for i in range(N_part_gas):
-    printProgressBar(i, N_part_gas, length=50)
+if have_gas:
     
-    # sample radius
-    x = uniform(0, 1)
-    idx = find_closest(CPD_arr_gas, x)
-    r = r_arr[idx]
+    print('')
+    print('Sampling gas ...')
+
+    coords_gas = np.zeros([N_part_gas, 3])
+    vels_gas = np.zeros([N_part_gas, 3])
+    temps_gas = np.zeros(N_part_gas)
+
+    for i in range(N_part_gas):
+        printProgressBar(i, N_part_gas, length=50)
+
+        # sample radius
+        x = uniform(0, 1)
+        r = inverse_CPD_Hernquist(x)
+
+        # sample angular position 
+        phi = uniform(0, 1) * 2 * np.pi
+        x = uniform(0.0,1.0)-0.5
+        theta = np.arccos(-2.0*x)
+
+        # set coordinates
+        coords_gas[i][0] = r*np.sin(theta)*np.cos(phi)
+        coords_gas[i][1] = r*np.sin(theta)*np.sin(phi)
+        coords_gas[i][2] = r*np.cos(theta)
+
+        # set temperature
+        idx = find_closest(r_arr_gas, r)
+        temps_gas[i] = temp_arr[idx]
     
-    # sample angular position 
-    phi = uniform(0, 1) * 2 * np.pi
-    x = uniform(0.0,1.0)-0.5
-    theta = np.arccos(-2.0*x)
-    
-    # set coordinates
-    coords_gas[i][0] = r*np.sin(theta)*np.cos(phi)
-    coords_gas[i][1] = r*np.sin(theta)*np.sin(phi)
-    coords_gas[i][2] = r*np.cos(theta)
-    
-    # set temperature
-    temps_gas[i] = temp_arr[idx]
-    
-print('')
-print('Sampling DM ...')
+if have_DM:
+    print('')
+    print('Sampling DM ...')
 
-coords_DM = np.zeros([N_part_DM, 3])
-vels_DM = np.zeros([N_part_DM, 3])
+    coords_DM = np.zeros([N_part_DM,3])
+    vels_DM = np.zeros([N_part_DM,3])
 
-for i in range(N_part_DM):
-    printProgressBar(i, N_part_DM, length=50)
+    for i in range(N_part_DM):
+        printProgressBar(i, N_part_DM, length=50)
 
-    # sample radius 
-    x = uniform(0, 1)
-    r = inverse_CPD_NFW(x)
+        # sample radius 
+        x = uniform(0, 1)
+        r = inverse_CPD_NFW(x)
 
-    # sample angular position 
-    phi = uniform(0, 1) * 2 * np.pi
-    x = uniform(0.0,1.0)-0.5
-    theta = np.arccos(-2.0*x)
+        # sample angular position 
+        phi = uniform(0, 1) * 2 * np.pi
+        x = uniform(0.0,1.0)-0.5
+        theta = np.arccos(-2.0*x)
 
-    # find coordinates
-    coords_DM[i][0] = r*np.sin(theta)*np.cos(phi)
-    coords_DM[i][1] = r*np.sin(theta)*np.sin(phi)
-    coords_DM[i][2] = r*np.cos(theta)
+        # find coordinates
+        coords_DM[i][0] = r*np.sin(theta)*np.cos(phi)
+        coords_DM[i][1] = r*np.sin(theta)*np.sin(phi)
+        coords_DM[i][2] = r*np.cos(theta)
 
-    # find square velocity dispersion
-    idx = find_closest(r_arr, r)
-    sigma2 = sigma2_arr[idx]
-    sigma = np.sqrt(sigma2)
+        # find square velocity dispersion
+        idx = find_closest(r_arr_DM, r)
+        sigma2 = sigma2_arr[idx]
+        sigma = np.sqrt(sigma2)
 
-    vels_DM[i][0] = gauss(0, sigma)
-    vels_DM[i][1] = gauss(0, sigma)
-    vels_DM[i][2] = gauss(0, sigma)
+        vels_DM[i][0] = gauss(0, sigma)
+        vels_DM[i][1] = gauss(0, sigma)
+        vels_DM[i][2] = gauss(0, sigma)
     
 #############################################################################################################
 ############################################# SAVE TO HDF5 FILE #############################################
@@ -255,23 +271,32 @@ print('Saving ...',end='')
 
 data = []
 
-data_gas = {}
-data_gas['count'] = N_part_gas
-data_gas['PartMass'] = total_mass_gas/N_part_gas
-data_gas['PartType'] = 0
-data_gas['Coordinates'] = coords_gas
-data_gas['Velocities'] = vels_gas
-data_gas['InternalEnergy'] = temps_gas
-data.append(data_gas)
-    
-data_DM = {}
-data_DM['count'] = N_part_DM
-data_DM['PartMass'] = total_mass_DM/N_part_DM
-data_DM['PartType'] = 1
-data_DM['Coordinates'] = coords_DM
-data_DM['Velocities'] = vels_DM
-data.append(data_DM)
+if have_gas:
+    part_mass_gas = total_mass_gas/N_part_gas
+    data_gas = {}
+    data_gas['count'] = N_part_gas
+    data_gas['PartMass'] = part_mass_gas
+    data_gas['PartType'] = 0
+    data_gas['Coordinates'] = coords_gas
+    data_gas['Velocities'] = vels_gas
+    data_gas['InternalEnergy'] = temps_gas
+    data.append(data_gas)
 
-tp.write_IC_hdf5('Cluster_DM_gas_v2', data)
+if have_DM:
+    part_mass_DM = total_mass_DM/N_part_DM
+    data_DM = {}
+    data_DM['count'] = N_part_DM
+    data_DM['PartMass'] = part_mass_DM
+    data_DM['PartType'] = 1
+    data_DM['Coordinates'] = coords_DM
+    data_DM['Velocities'] = vels_DM
+    data.append(data_DM)
+
+tp.write_IC_hdf5(filename, data)
 
 print('done!')
+print('Suggested softening lengths based on mean central interparticle spacing:')
+if have_gas:
+    print('Gas: ', np.round(mean_particle_separation_gas(r_s_gas/5)*2, 3), ' kpc')
+if have_DM:
+    print('DM: ', np.round(mean_particle_separation_DM(r_s_gas/5)*2, 3), ' kpc')
