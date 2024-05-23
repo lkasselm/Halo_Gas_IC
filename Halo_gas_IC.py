@@ -15,12 +15,11 @@ from IPython.display import HTML
 import warnings
 import matplotlib
 matplotlib.rcParams['figure.figsize'] = [20,10]
-plt.style.use('dark_background')
+#plt.style.use('dark_background')
 import warnings
 warnings.filterwarnings("ignore")
 from scipy.integrate import quad
-from random import uniform
-from random import gauss
+from random import uniform, gauss
 import tools_python as tp
 
 ############################################################################################################
@@ -28,28 +27,52 @@ import tools_python as tp
 ############################################################################################################
 
 reuse_tables = False # reuse integration tables. Make sure you are using the same parameters
-Parallel = False # Use multiple threads (not yet implemented)
+Parallel = False # Use multiple threads 
 
 have_gas = True
 have_DM = True
 
+G = 1
+
 #gas_profile = 'Burkert'
 gas_profile = 'Hernquist'
 
-filename = 'dSph_normal_DM1e6_gas1e5'
+filename = 'dSph_diffuse'
+
+Create_sim_folder = True
+sim_parent_dir = '../dSph_stability_tests/'
+sim_name = 'r_max_10'
+gadget_location = '../dSph_stability_tests/dSph_normal/P-Gadget3'
 
 N_sampling = 10000 # size of the arrays created in numerical integration
 
+"""
 N_part_gas = int(1e5) # number of particles to sample
 r_s_gas = 0.4 # normal dsph
 #r_s_gas = 194.78 # cluster
 rho_s_gas = 0.26 # normal dsph
-# rho_s_gas = 9.72e-5 # cluster
+#rho_s_gas = 9.72e-5 # cluster
 
 N_part_DM = int(1e6)
-r_max = 20 # maximum sampling distance of the system in units of r_s_DM
+r_max_DM = 10 # maximum sampling distance of the system in units of r_s_DM
+r_max_gas = 20
 r_s_DM = 9.5 # dSph
 rho_s_DM = 4.022e-4 # dSph
+"""
+
+N_part_gas = int(1e5) # number of particles to sample
+#r_s_gas = 0.39 # normal dsph
+r_s_gas = 0.787 # diffuse dSph
+#r_s_gas = 194.78 # cluster
+#rho_s_gas = 0.26 # normal dsph
+rho_s_gas = 0.033 # diffuse dSph
+#rho_s_gas = 9.72e-5 # cluster
+
+N_part_DM = int(1e6)
+r_max_DM = 10 # maximum sampling distance of the system in units of r_s_DM
+r_max_gas = 10
+r_s_DM = 9.5 # dSph
+rho_s_DM = 6.228e-4 # dSph
 
 ############################################################################################################
 ################################################ FUNCTIONS #################################################
@@ -57,7 +80,9 @@ rho_s_DM = 4.022e-4 # dSph
 
 def find_closest(array, value):
     # find index of 'array' which is closest to 'value'
-    return np.abs(array - value).argmin()
+    diff = array - value
+    idx = np.abs(diff).argmin()
+    return idx, diff[idx]
 
 def Burkert(r):
     x = r/r_s_gas
@@ -65,7 +90,7 @@ def Burkert(r):
 
 def NFW(r):
     x = r/r_s_DM
-    return rho_s_DM/(x * (1+x**2))
+    return rho_s_DM/(x * (1+x)**2)
 
 def Hernquist(r):
     x = r/r_s_gas
@@ -80,19 +105,16 @@ def inverse_CPD_Hernquist(x):
     x *= (r_max_gas/r_s_gas)**2/( (r_max_gas/r_s_gas) +1)**2
     return - r_s_gas * np.sqrt(x)/(np.sqrt(x)-1)
 
+def potential_Hernquist(r):
+    mass = 2*np.pi*rho_s_gas*r_s_gas**3
+    return -G*mass/(r + r_s_gas)
+
 def mass_NFW(r):
     # return mass enclosed in r
-    x = r/r_s_DM
-    return 2 * np.pi * rho_s_DM * r_s_DM**3 * np.log(x**2 + 1)
+    return 4 * np.pi * rho_s_DM * r_s_DM**3 * ( np.log( (r_s_DM + r) /r_s_DM ) - r/(r_s_DM + r))
 
-def inverse_CPD_NFW(x):
-    # draw random radius from inverse CPD for NFW profile.
-    # assumes that x is drawn from a uniform distribution 
-    # between 0 and 1. 
-    # r_max is the maximum sampling distance 
-    # (has to be finite in this case)
-    x *= np.log((r_max_DM/r_s_DM)**2 +1)
-    return r_s_DM * np.sqrt(np.exp(x) -1)
+def potential_NFW(r):
+    return - (4 * np.pi * G * rho_s_DM) * (r_s_DM**3/r) * np.log(1 + r/r_s_DM)
 
 def mass_Burkert(r):
     def dMdr(r):
@@ -131,6 +153,9 @@ def temp_gas(r):
 def total_mass(r):
     return have_DM * mass_NFW(r) + have_gas * mass_gas(r)
 
+def total_potential(r):
+    return have_DM * potential_NFW(r) + have_gas * potential_Hernquist(r)
+
 def sigma_2_halo(r):
     def dpdr(r):
         return 43000 * NFW(r) * total_mass(r)/r**2
@@ -153,8 +178,8 @@ def printProgressBar (iteration, total, prefix = '', suffix = '', decimals = 1, 
 ######################################## CALCULATE INTEGRATION TABLES #######################################
 #############################################################################################################
 
-r_max_gas = r_max * r_s_gas
-r_max_DM = r_max * r_s_DM
+r_max_gas = r_max_gas * r_s_gas
+r_max_DM = r_max_DM * r_s_DM
 
 if reuse_tables:
     tables = np.load('int_tables.npy')
@@ -179,7 +204,9 @@ else:
             temp_arr[i] = temp_gas(r)
 
     if have_DM:
-        print('')
+        M_arr_DM = mass_NFW(r_arr_DM)
+        CPD_arr_DM = M_arr_DM/np.amax(M_arr_DM)
+        
         print('Calculating DM velocity dispersion profile...')
 
         sigma2_arr = np.zeros(N_sampling)
@@ -209,7 +236,8 @@ if have_gas:
     temps_gas = np.zeros(N_part_gas)
 
     for i in range(N_part_gas):
-        printProgressBar(i, N_part_gas, length=50)
+        if i%1000 == 0:
+            printProgressBar(i, N_part_gas, length=50)
 
         # sample radius
         x = uniform(0, 1)
@@ -226,7 +254,7 @@ if have_gas:
         coords_gas[i][2] = r*np.cos(theta)
 
         # set temperature
-        idx = find_closest(r_arr_gas, r)
+        idx, diff = find_closest(r_arr_gas, r)
         temps_gas[i] = temp_arr[idx]
     
 if have_DM:
@@ -237,11 +265,13 @@ if have_DM:
     vels_DM = np.zeros([N_part_DM,3])
 
     for i in range(N_part_DM):
-        printProgressBar(i, N_part_DM, length=50)
+        if i%1000 == 0:
+            printProgressBar(i, N_part_DM, length=50)
 
         # sample radius 
         x = uniform(0, 1)
-        r = inverse_CPD_NFW(x)
+        idx, diff = find_closest(CPD_arr_DM, x)
+        r = r_arr_DM[idx]
 
         # sample angular position 
         phi = uniform(0, 1) * 2 * np.pi
@@ -254,7 +284,7 @@ if have_DM:
         coords_DM[i][2] = r*np.cos(theta)
 
         # find square velocity dispersion
-        idx = find_closest(r_arr_DM, r)
+        idx, diff = find_closest(r_arr_DM, r)
         sigma2 = sigma2_arr[idx]
         sigma = np.sqrt(sigma2)
 
@@ -299,4 +329,4 @@ print('Suggested softening lengths based on mean central interparticle spacing:'
 if have_gas:
     print('Gas: ', np.round(mean_particle_separation_gas(r_s_gas/5)*2, 3), ' kpc')
 if have_DM:
-    print('DM: ', np.round(mean_particle_separation_DM(r_s_gas/5)*2, 3), ' kpc')
+    print('DM: ', np.round(mean_particle_separation_DM(r_s_DM/5)*2, 3), ' kpc')
